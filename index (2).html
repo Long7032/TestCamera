@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kết nối Camera — Bootstrap 5</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    /* Một vài tùy chỉnh nhỏ */
+    body { background:#f8f9fa; }
+    .video-wrap { background:#000; display:flex; align-items:center; justify-content:center; height:360px; overflow:hidden; }
+    video { max-width:100%; max-height:100%; }
+    canvas { display:none; }
+    .controls > * { margin-right:.5rem; }
+    .muted-note { font-size:.9rem; color:#6c757d; }
+  </style>
+</head>
+<body>
+  <div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h3 class="mb-0">Kết nối Camera (Bootstrap 5 + JS)</h3>
+      <small class="muted-note">Mở trang bằng HTTPS hoặc trên <code>localhost</code></small>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-lg-8">
+        <div class="card">
+          <div class="card-body">
+            <div class="video-wrap mb-3">
+              <video id="video" autoplay playsinline></video>
+              <canvas id="canvas"></canvas>
+            </div>
+
+            <div class="d-flex flex-wrap align-items-center controls mb-2">
+              <select id="videoSource" class="form-select w-auto" aria-label="Chọn camera"></select>
+
+              <div class="form-check form-switch ms-2">
+                <input class="form-check-input" type="checkbox" id="mirrorToggle">
+                <label class="form-check-label" for="mirrorToggle">Mirror (gương)</label>
+              </div>
+
+              <button id="snap" class="btn btn-primary ms-2">Chụp ảnh</button>
+              <button id="download" class="btn btn-success ms-1" disabled>Tải ảnh</button>
+              <button id="stop" class="btn btn-danger ms-1">Dừng camera</button>
+            </div>
+
+            <div class="d-flex gap-2 align-items-center">
+              <label class="me-2 mb-0">Độ phân giải:</label>
+              <select id="resolution" class="form-select w-auto">
+                <option value="default">Mặc định</option>
+                <option value="qvga">320x240 (QVGA)</option>
+                <option value="vga">640x480 (VGA)</option>
+                <option value="hd">1280x720 (HD)</option>
+                <option value="fullhd">1920x1080 (Full HD)</option>
+              </select>
+              <div class="ms-3 text-muted">Trạng thái: <span id="status">Chưa khởi động</span></div>
+            </div>
+
+            <hr>
+            <div>
+              <h6>Ảnh chụp</h6>
+              <img id="photo" class="img-fluid border" alt="Ảnh chụp sẽ hiển thị ở đây">
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-4">
+        <div class="card">
+          <div class="card-body">
+            <h6>Thông tin thiết bị</h6>
+            <ul id="deviceList" class="list-group list-group-flush mb-3"></ul>
+
+            <h6>Gợi ý & Lỗi</h6>
+            <div id="log" style="white-space:pre-wrap; max-height:300px; overflow:auto; font-size:.9rem; color:#212529"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // Elements
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const photo = document.getElementById('photo');
+    const snapBtn = document.getElementById('snap');
+    const downloadBtn = document.getElementById('download');
+    const stopBtn = document.getElementById('stop');
+    const videoSelect = document.getElementById('videoSource');
+    const deviceList = document.getElementById('deviceList');
+    const logEl = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+    const resolutionSelect = document.getElementById('resolution');
+    const mirrorToggle = document.getElementById('mirrorToggle');
+
+    let currentStream = null;
+
+    function log(s) {
+      const time = new Date().toLocaleTimeString();
+      logEl.textContent = `[${time}] ${s}\n` + logEl.textContent;
+    }
+
+    // Ghép mirror nếu cần
+    mirrorToggle.addEventListener('change', () => {
+      if (mirrorToggle.checked) video.style.transform = 'scaleX(-1)';
+      else video.style.transform = '';
+    });
+
+    // Lấy danh sách thiết bị
+    async function updateDeviceList() {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(d => d.kind === 'videoinput');
+        videoSelect.innerHTML = '';
+        deviceList.innerHTML = '';
+        videoDevices.forEach((d, i) => {
+          const option = document.createElement('option');
+          option.value = d.deviceId;
+          option.text = d.label || `Camera ${i+1}`;
+          videoSelect.appendChild(option);
+
+          const li = document.createElement('li');
+          li.className = 'list-group-item';
+          li.textContent = `${option.text} — id: ${d.deviceId}`;
+          deviceList.appendChild(li);
+        });
+        if (videoDevices.length === 0) {
+          log('Không tìm thấy camera.');
+        }
+      } catch (err) {
+        log('Lỗi enumerateDevices: ' + err.message);
+      }
+    }
+
+    // Chuyển đổi resolution value thành constraint
+    function resolutionConstraints(kind) {
+      switch(kind) {
+        case 'qvga': return { width: { exact: 320 }, height: { exact: 240 } };
+        case 'vga': return { width: { exact: 640 }, height: { exact: 480 } };
+        case 'hd': return { width: { ideal: 1280 }, height: { ideal: 720 } };
+        case 'fullhd': return { width: { ideal: 1920 }, height: { ideal: 1080 } };
+        default: return {};
+      }
+    }
+
+    // Khởi động camera
+    async function startStream(deviceId = null) {
+      stopStream();
+      const resolutionVal = resolutionSelect.value;
+      const res = resolutionConstraints(resolutionVal);
+
+      const constraints = {
+        video: Object.assign({
+          deviceId: deviceId ? { exact: deviceId } : undefined,
+          facingMode: 'user'
+        }, res),
+        audio: false
+      };
+
+      try {
+        log('Yêu cầu quyền truy cập camera...');
+        statusEl.textContent = 'Yêu cầu quyền...';
+        currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = currentStream;
+        statusEl.textContent = 'Đang phát';
+        log('Camera đang hoạt động.');
+        downloadBtn.disabled = true;
+      } catch (err) {
+        statusEl.textContent = 'Lỗi';
+        log('Không thể truy cập camera: ' + err.message);
+      }
+    }
+
+    function stopStream() {
+      if (currentStream) {
+        currentStream.getTracks().forEach(t => t.stop());
+        currentStream = null;
+        video.srcObject = null;
+        statusEl.textContent = 'Đã dừng';
+        log('Camera đã dừng.');
+      }
+    }
+
+    videoSelect.addEventListener('change', () => startStream(videoSelect.value));
+    resolutionSelect.addEventListener('change', () => startStream(videoSelect.value));
+
+    // Chụp ảnh
+    snapBtn.addEventListener('click', () => {
+      if (!currentStream) { log('Chưa có luồng video.'); return; }
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) { log('Video chưa sẵn sàng.'); return; }
+
+      canvas.width = vw;
+      canvas.height = vh;
+      const ctx = canvas.getContext('2d');
+
+      // Nếu mirror true thì vẽ đảo
+      if (mirrorToggle.checked) {
+        ctx.translate(vw, 0);
+        ctx.scale(-1,1);
+      }
+
+      ctx.drawImage(video, 0, 0, vw, vh);
+      // reset transform
+      if (mirrorToggle.checked) ctx.setTransform(1,0,0,1,0,0);
+
+      const dataUrl = canvas.toDataURL('image/png');
+      photo.src = dataUrl;
+      downloadBtn.href = dataUrl;
+      downloadBtn.download = `photo-${Date.now()}.png`;
+      downloadBtn.disabled = false;
+      photo.style.display = '';
+      log('Đã chụp ảnh.');
+    });
+
+    // Download as a link
+    downloadBtn.addEventListener('click', (e) => {
+      if (downloadBtn.disabled) e.preventDefault();
+    });
+
+    stopBtn.addEventListener('click', () => stopStream());
+
+    // Khi load, kiểm tra API
+    async function init() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        log('Trình duyệt không hỗ trợ MediaDevices API. Hãy thử Chrome/Edge/Firefox mới nhất.');
+        statusEl.textContent = 'Không hỗ trợ';
+        return;
+      }
+
+      try {
+        await updateDeviceList();
+        // Nếu có camera mặc định, khởi động camera đầu tiên
+        const first = videoSelect.options[0];
+        if (first) {
+          await startStream(first.value);
+        } else {
+          statusEl.textContent = 'Không tìm thấy camera';
+        }
+      } catch (err) {
+        log('Lỗi khởi tạo: ' + err.message);
+      }
+
+      // Cập nhật danh sách khi có thay đổi thiết bị
+      navigator.mediaDevices.addEventListener('devicechange', async () => {
+        log('Danh sách thiết bị thay đổi. Cập nhật...');
+        await updateDeviceList();
+      });
+    }
+
+    // Khởi chạy
+    init();
+
+  </script>
+</body>
+</html>
